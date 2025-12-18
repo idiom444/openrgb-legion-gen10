@@ -1,0 +1,448 @@
+diff --git a/Controllers/LenovoControllers/LenovoDevices.h b/Controllers/LenovoControllers/LenovoDevices.h
+index 1233cb1a..aa53aea0 100644
+--- a/Controllers/LenovoControllers/LenovoDevices.h
++++ b/Controllers/LenovoControllers/LenovoDevices.h
+@@ -37,6 +37,7 @@
+ #define LEGION_S7GEN8                           0xC987
+ #define LEGION_7GEN9                            0xC997
+ #define LEGION_7GEN9_H                          0xC998
++#define LEGION_7GEN10                           0xC197
+ 
+ enum LENOVO_KEYBOARD
+ {
+@@ -1878,6 +1879,28 @@ const lenovo_led legion_7gen7_vents_leds[]
+     {0xF0, "Vent group 8"},//7
+ };
+ 
++const lenovo_led legion_7gen10_vents_leds[]
++{
++    {0xE9, "Vent group 1"},//0
++    {0xEA, "Vent group 2"},//1
++    {0xEB, "Vent group 3"},//2
++    {0xEC, "Vent group 4"},//3
++    {0xED, "Vent group 5"},//4
++    {0xEE, "Vent group 6"},//5
++    {0xEF, "Vent group 7"},//6
++    {0xF0, "Vent group 8"},//7
++    {0xF1, "Vent group 9"},//8
++    {0xF2, "Vent group 10"},//9
++    {0xF3, "Vent group 11"},//10
++    {0xF4, "Vent group 12"},//11
++    {0xF5, "Vent group 13"},//12
++    {0xF6, "Vent group 14"},//13
++    {0xF7, "Vent group 15"},//14
++    {0xF8, "Vent group 16"},//15
++    {0xF9, "Vent group 17"},//16
++    {0xFA, "Vent group 18"},//17
++};
++
+ const lenovo_led legion_7gen7_logo_leds[]
+ {
+     {0xDD, "Logo"},//0
+@@ -1931,6 +1954,19 @@ static lenovo_zone lenovo_legion_7gen7_vents
+     7,
+ };
+ 
++static lenovo_zone lenovo_legion_7gen10_vents
++{
++    "Vents",
++    ZONE_TYPE_LINEAR,
++    3,
++    1,
++    18,
++    NULL,
++    legion_7gen10_vents_leds,
++    0,
++    17,
++};
++
+ /*------*\
+ |neon    |
+ \*------*/
+diff --git a/Controllers/LenovoControllers/LenovoUSBControllerDetect.cpp b/Controllers/LenovoControllers/LenovoUSBControllerDetect.cpp
+index 7b5a87a4..496f8633 100644
+--- a/Controllers/LenovoControllers/LenovoUSBControllerDetect.cpp
++++ b/Controllers/LenovoControllers/LenovoUSBControllerDetect.cpp
+@@ -66,3 +66,4 @@ REGISTER_HID_DETECTOR_PU("Lenovo Legion 7 Gen 8",   DetectLenovoLegionUSBControl
+ REGISTER_HID_DETECTOR_PU("Lenovo Legion 7S Gen 8",  DetectLenovoLegionUSBControllersGen7And8, ITE_VID, LEGION_S7GEN8,  LENOVO_PAGE, LENOVO_USAGE);
+ REGISTER_HID_DETECTOR_PU("Lenovo Legion 7 Gen 9",   DetectLenovoLegionUSBControllersGen7And8, ITE_VID, LEGION_7GEN9,   LENOVO_PAGE, LENOVO_USAGE);
+ REGISTER_HID_DETECTOR_PU("Lenovo Legion 7 Gen 9",   DetectLenovoLegionUSBControllersGen7And8, ITE_VID, LEGION_7GEN9_H, LENOVO_PAGE, LENOVO_USAGE);
++REGISTER_HID_DETECTOR_PU("Lenovo Legion 7 Gen 10",  DetectLenovoLegionUSBControllersGen7And8, ITE_VID, LEGION_7GEN10,  LENOVO_PAGE, LENOVO_USAGE);
+diff --git a/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/LenovoUSBController_Gen7_8.cpp b/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/LenovoUSBController_Gen7_8.cpp
+index 9a4bfa5f..d09caa56 100644
+--- a/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/LenovoUSBController_Gen7_8.cpp
++++ b/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/LenovoUSBController_Gen7_8.cpp
+@@ -9,11 +9,23 @@
+ 
+ #include <iomanip>
+ #include <sstream>
++#include "LenovoDevices.h"
+ #include "LenovoUSBController_Gen7_8.h"
+ #include "StringUtils.h"
+ 
+ using namespace std;
+ 
++static void SetGen10PayloadLength(uint16_t pid, uint8_t* buffer, uint16_t payload_length)
++{
++    if(pid != LEGION_7GEN10)
++    {
++        return;
++    }
++
++    buffer[2] = payload_length & 0xFF;
++    buffer[3] = (payload_length >> 8) & 0xFF;
++}
++
+ LenovoGen7And8USBController::LenovoGen7And8USBController(hid_device* dev_handle, const char* path, uint16_t in_pid, std::string dev_name)
+ {
+     dev                     = dev_handle;
+@@ -44,54 +56,74 @@ string LenovoGen7And8USBController::getLocation()
+ 
+ void LenovoGen7And8USBController::setLedsByGroup(uint8_t profile_id, vector<led_group> led_groups)
+ {
+-    uint8_t buffer[PACKET_SIZE];
+-    memset(buffer, 0x00, PACKET_SIZE);
+-
+-    size_t i = 0;
+-    buffer[i++] = REPORT_ID;
+-    buffer[i++] = SAVE_PROFILE;
+-    buffer[i++] = 0xC0;
+-    buffer[i++] = 0x03;
+-    buffer[i++] = profile_id;
+-    buffer[i++] = 0x01;
+-    buffer[i++] = 0x01;
++    if(led_groups.empty())
++    {
++        return;
++    }
+ 
+-    for(size_t group = 0; group < led_groups.size() && i < PACKET_SIZE - 21; group++)
++    /*---------------------------------------------------------*\
++    | Some devices require many groups for per-key updates.     |
++    | Send as many groups as fit in one report, then continue   |
++    | in additional reports.                                    |
++    \*---------------------------------------------------------*/
++    size_t group = 0;
++    while(group < led_groups.size())
+     {
+-        buffer[i++] = (uint8_t)group + 1;  //Group index
+-        buffer[i++] = 0x06;
+-        buffer[i++] = 0x01;
+-        buffer[i++] = led_groups[group].mode;
+-        buffer[i++] = 0x02;
+-        buffer[i++] = led_groups[group].speed;
++        uint8_t buffer[PACKET_SIZE];
++        memset(buffer, 0x00, PACKET_SIZE);
++
++        size_t i = 0;
++        buffer[i++] = REPORT_ID;
++        buffer[i++] = SAVE_PROFILE;
++        buffer[i++] = 0xC0;
+         buffer[i++] = 0x03;
+-        buffer[i++] = led_groups[group].spin;
+-        buffer[i++] = 0x04;
+-        buffer[i++] = led_groups[group].direction;
+-        buffer[i++] = 0x05;
+-        buffer[i++] = led_groups[group].color_mode;
+-        buffer[i++] = 0x06;
+-        buffer[i++] = 0x00;
++        buffer[i++] = profile_id;
++        buffer[i++] = 0x01;
++        buffer[i++] = 0x01;
+ 
+-        buffer[i++] = (uint8_t)led_groups[group].colors.size();
+-        for(RGBColor c : led_groups[group].colors)
++        for(; group < led_groups.size() && i < PACKET_SIZE - 21; group++)
+         {
+-            buffer[i++] = RGBGetRValue(c);
+-            buffer[i++] = RGBGetGValue(c);
+-            buffer[i++] = RGBGetBValue(c);
++            buffer[i++] = (uint8_t)group + 1;  //Group index
++            buffer[i++] = 0x06;
++            buffer[i++] = 0x01;
++            buffer[i++] = led_groups[group].mode;
++            buffer[i++] = 0x02;
++            buffer[i++] = led_groups[group].speed;
++            buffer[i++] = 0x03;
++            buffer[i++] = led_groups[group].spin;
++            buffer[i++] = 0x04;
++            buffer[i++] = led_groups[group].direction;
++            buffer[i++] = 0x05;
++            buffer[i++] = led_groups[group].color_mode;
++            buffer[i++] = 0x06;
++            buffer[i++] = 0x00;
++
++            buffer[i++] = (uint8_t)led_groups[group].colors.size();
++            for(RGBColor c : led_groups[group].colors)
++            {
++                buffer[i++] = RGBGetRValue(c);
++                buffer[i++] = RGBGetGValue(c);
++                buffer[i++] = RGBGetBValue(c);
++            }
++
++            vector<uint16_t> leds = led_groups[group].leds;
++            size_t led_count = min(leds.size(), (PACKET_SIZE - i)/2);
++            buffer[i++] = (uint8_t)led_count;
++            uint8_t* byte_ptr = reinterpret_cast<uint8_t*>(leds.data());
++            std::copy(byte_ptr, byte_ptr + led_count * sizeof(uint16_t), buffer + i);
++            i+= led_count * sizeof(uint16_t);
+         }
+ 
+-        vector<uint16_t> leds = led_groups[group].leds;
+-        size_t led_count = min(leds.size(), (PACKET_SIZE - i)/2);
+-        buffer[i++] = (uint8_t)led_count;
+-        uint8_t* byte_ptr = reinterpret_cast<uint8_t*>(leds.data());
+-        std::copy(byte_ptr, byte_ptr + led_count * sizeof(uint16_t), buffer + i);
+-        i+= led_count * sizeof(uint16_t);
++        if(pid == LEGION_7GEN10)
++        {
++            SetGen10PayloadLength(pid, buffer, static_cast<uint16_t>(i - 4));
++        }
++        else
++        {
++            buffer[2] = (uint8_t)i;
++        }
++        sendFeatureReport(buffer, PACKET_SIZE);
+     }
+-
+-    buffer[2] = (uint8_t)i;
+-
+-    sendFeatureReport(buffer, PACKET_SIZE);
+ }
+ 
+ void LenovoGen7And8USBController::setLedsDirectOn(uint8_t profile_id)
+@@ -107,6 +139,7 @@ void LenovoGen7And8USBController::setLedsDirectOn(uint8_t profile_id)
+     buffer[i++] = 0x01;
+     buffer[i++] = profile_id;
+ 
++    SetGen10PayloadLength(pid, buffer, 2);
+     sendFeatureReport(buffer, PACKET_SIZE);
+ }
+ 
+@@ -123,11 +156,43 @@ void LenovoGen7And8USBController::setLedsDirectOff(uint8_t profile_id)
+     buffer[i++] = 0x02;
+     buffer[i++] = profile_id;
+ 
++    SetGen10PayloadLength(pid, buffer, 2);
+     sendFeatureReport(buffer, PACKET_SIZE);
+ }
+ 
+ void LenovoGen7And8USBController::setLedsDirect(std::vector<led> &leds, std::vector<RGBColor> &colors)
+ {
++    if(pid == LEGION_7GEN10)
++    {
++        /*---------------------------------------------------------*\
++        | Gen10 uses 0x07/A1 direct updates, with payload length     |
++        | stored in bytes 2-3.                                       |
++        \*---------------------------------------------------------*/
++        uint8_t buffer[PACKET_SIZE];
++        memset(buffer, 0x00, PACKET_SIZE);
++
++        size_t i = 0;
++        buffer[i++] = REPORT_ID;
++        buffer[i++] = DIRECT_MODE;
++        buffer[i++] = 0x00;
++        buffer[i++] = 0x00;
++
++        size_t count = 0;
++        for(size_t index = 0; index < leds.size() && index < colors.size() && i + 5 <= PACKET_SIZE; index++)
++        {
++            buffer[i++] = leds[index].value & 0xFF;
++            buffer[i++] = leds[index].value >> 8 & 0xFF;
++            buffer[i++] = RGBGetRValue(colors[index]);
++            buffer[i++] = RGBGetGValue(colors[index]);
++            buffer[i++] = RGBGetBValue(colors[index]);
++            count++;
++        }
++
++        SetGen10PayloadLength(pid, buffer, static_cast<uint16_t>(count * 5));
++        sendFeatureReport(buffer, PACKET_SIZE);
++        return;
++    }
++
+     uint8_t buffer[PACKET_SIZE];
+     memset(buffer, 0x00, PACKET_SIZE);
+ 
+@@ -153,6 +218,7 @@ void LenovoGen7And8USBController::setLedsAllOff(uint8_t profile_id)
+ {
+     uint8_t buffer[PACKET_SIZE] = {REPORT_ID, SAVE_PROFILE, 0xC0, 0x03, profile_id, 0x01, 0x01};
+ 
++    SetGen10PayloadLength(pid, buffer, 3);
+     sendFeatureReport(buffer, PACKET_SIZE);
+ }
+ 
+@@ -160,6 +226,7 @@ uint8_t LenovoGen7And8USBController::getCurrentProfileId()
+ {
+     uint8_t buffer[PACKET_SIZE] = {REPORT_ID, GET_ACTIVE_PROFILE, 0xC0, 0x03};
+ 
++    SetGen10PayloadLength(pid, buffer, 1);
+     vector<uint8_t> response = getFeatureReport(buffer, PACKET_SIZE);
+ 
+     return response.size()>4?response[4]:0x01;
+@@ -169,6 +236,7 @@ uint8_t LenovoGen7And8USBController::getCurrentBrightness()
+ {
+     uint8_t buffer[PACKET_SIZE] = {REPORT_ID, GET_BRIGHTNESS, 0xC0, 0x03};
+ 
++    SetGen10PayloadLength(pid, buffer, 1);
+     vector<uint8_t> response = getFeatureReport(buffer, PACKET_SIZE);
+ 
+     return response.size()>4?response[4]:0x00;
+@@ -179,6 +247,7 @@ void LenovoGen7And8USBController::setBrightness(uint8_t brightness)
+ {
+     uint8_t buffer[PACKET_SIZE] = {REPORT_ID, SET_BRIGHTNESS, 0xC0, 0x03, brightness};
+ 
++    SetGen10PayloadLength(pid, buffer, 1);
+     sendFeatureReport(buffer, PACKET_SIZE);
+ }
+ 
+@@ -186,6 +255,7 @@ void LenovoGen7And8USBController::switchProfileTo(uint8_t profile_id)
+ {
+     uint8_t buffer[PACKET_SIZE] = {REPORT_ID, SWITCH_PROFILE, 0xC0, 0x03, profile_id};
+ 
++    SetGen10PayloadLength(pid, buffer, 1);
+     sendFeatureReport(buffer, PACKET_SIZE);
+ }
+ 
+@@ -193,6 +263,7 @@ std::vector<led_group> LenovoGen7And8USBController::getProfileSettings(uint8_t p
+ {
+     uint8_t buffer[PACKET_SIZE] = {REPORT_ID, GET_PROFILE, 0xC0, 0x03, profile_id};
+ 
++    SetGen10PayloadLength(pid, buffer, PACKET_SIZE - 4);
+     vector<uint8_t> response = getFeatureReport(buffer, PACKET_SIZE);
+ 
+     vector<led_group> groups;
+diff --git a/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.cpp b/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.cpp
+index 2a924352..ac7d2b65 100644
+--- a/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.cpp
++++ b/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.cpp
+@@ -245,7 +245,6 @@ LenovoRGBController_Gen7_8::LenovoRGBController_Gen7_8(LenovoGen7And8USBControll
+     Direct.brightness = brightness;
+     modes.push_back(Direct);
+ 
+-
+     name   = controller->getName();
+     type   = DEVICE_TYPE_KEYBOARD;
+     vendor = "Lenovo";
+@@ -272,18 +271,33 @@ LenovoRGBController_Gen7_8::LenovoRGBController_Gen7_8(LenovoGen7And8USBControll
+     case LEGION_7GEN9_H:
+         description = "Lenovo Legion 7 Generation 9";
+         break;
++
++    case LEGION_7GEN10:
++        description = "Lenovo Legion 7 Generation 10";
++        break;
+     }
+ 
+     brightness = controller->getCurrentBrightness();
+     profile_id = controller->getCurrentProfileId();
++    for(mode &m : modes)
++    {
++        m.brightness = brightness;
++    }
+ 
+     SetupZones();
+ 
+     /*-----------------*\
+     | Initiliaze Static |
+     \*-----------------*/
+-    // ToDo: Commented causes a crash. (???)
+-    active_mode = 10;
++    active_mode = 0;
++    for(size_t i = 0; i < modes.size(); i++)
++    {
++        if(modes[i].value == LENOVO_LEGION_GEN7_8_MODE_STATIC)
++        {
++            active_mode = i;
++            break;
++        }
++    }
+     ReadDeviceSettings();
+     last_mode = active_mode;
+ }
+@@ -306,6 +320,12 @@ void LenovoRGBController_Gen7_8::SetupZones()
+         lenovo_zones.push_back(lenovo_legion_7gen7_vents);
+     }
+ 
++    if (controller->getPid() == LEGION_7GEN10)
++    {
++        lenovo_zones.push_back(lenovo_legion_7gen7_logo);
++        lenovo_zones.push_back(lenovo_legion_7gen10_vents);
++    }
++
+     for(unsigned int i = 0; i < lenovo_zones.size(); i++)
+     {
+         zone new_zone;
+@@ -378,6 +398,7 @@ void LenovoRGBController_Gen7_8::DeviceUpdateMode()
+         profile_id = hw_profile_id;
+         ReadDeviceSettings();
+         last_mode = active_mode;
++        direct_enabled = false;
+     }
+ 
+     if(brightness != modes[active_mode].brightness)
+@@ -392,21 +413,29 @@ void LenovoRGBController_Gen7_8::DeviceUpdateMode()
+ 
+     if(last_mode != active_mode)
+     {
+-
+         if(modes[last_mode].value == LENOVO_LEGION_GEN7_8_MODE_DIRECT)
+         {
+-                controller->setLedsDirectOff(profile_id);
++            controller->setLedsDirectOff(profile_id);
++            direct_enabled = false;
+         }
+ 
+-
+         if(modes[active_mode].value == LENOVO_LEGION_GEN7_8_MODE_DIRECT)
+         {
+-                controller->setLedsDirectOn(profile_id);
++            controller->setLedsDirectOn(profile_id);
++            direct_enabled = true;
++            if(controller->getPid() != LEGION_7GEN10)
++            {
+                 controller->setLedsByGroup(profile_id, GetLedGroups());
++            }
+         }
+ 
+         last_mode = active_mode;
+     }
++    else if((modes[active_mode].value == LENOVO_LEGION_GEN7_8_MODE_DIRECT) && !direct_enabled)
++    {
++        controller->setLedsDirectOn(profile_id);
++        direct_enabled = true;
++    }
+ 
+     if(modes[active_mode].value != LENOVO_LEGION_GEN7_8_MODE_DIRECT)
+     {
+@@ -418,6 +447,19 @@ void LenovoRGBController_Gen7_8::DeviceUpdateLEDs()
+ {
+     if(modes[active_mode].value == LENOVO_LEGION_GEN7_8_MODE_DIRECT)
+     {
++        if(controller->getPid() == LEGION_7GEN10)
++        {
++            /*---------------------------------------------------------*\
++            | Gen10 may ignore A1 updates unless D0 is reasserted.       |
++            \*---------------------------------------------------------*/
++            controller->setLedsDirectOn(profile_id);
++            direct_enabled = true;
++        }
++        else if(!direct_enabled)
++        {
++            controller->setLedsDirectOn(profile_id);
++            direct_enabled = true;
++        }
+         controller->setLedsDirect(leds, colors);
+     }
+     else
+diff --git a/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.h b/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.h
+index 2269c708..fc192b33 100644
+--- a/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.h
++++ b/Controllers/LenovoControllers/LenovoUSBController_Gen7_8/RGBController_Lenovo_Gen7_8.h
+@@ -51,6 +51,7 @@ private:
+     void ReadDeviceSettings();
+     std::unordered_map<unsigned int, size_t> led_id_to_index;
+     int last_mode = 0;
++    bool direct_enabled = false;
+     uint8_t brightness = 0x00;
+     uint8_t profile_id = 0x01;
+ };
