@@ -22,7 +22,7 @@ The actual OpenRGB change is submitted upstream as a GitLab Merge Request; this 
 
 - Upstream OpenRGB project: https://gitlab.com/CalcProgrammer1/OpenRGB
 - My fork/branch: https://gitlab.com/idiom444/OpenRGB/-/tree/lenovo-legion-gen10
-- Merge Request: **(paste your MR link here once created)**
+- Merge Request: https://gitlab.com/CalcProgrammer1/OpenRGB/-/merge_requests/3111
 
 ## Contents
 
